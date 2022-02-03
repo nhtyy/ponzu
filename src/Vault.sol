@@ -5,7 +5,7 @@ import "./libraries/safemath.sol";
 import "./libraries/IERC20.sol";
 import "./libraries/yearnVault.sol";
 
-// Special thanks to twiiter@prism0x for being way smarter than me with this distribution algo
+// Special thanks to twiiter@prism0x for this distribution algo
 // https://solmaz.io/2019/02/24/scalable-reward-changing/
 
 
@@ -20,6 +20,24 @@ contract pVault {
 
     // #########################
     // ##                     ##
+    // ##       Structs       ##
+    // ##                     ##
+    // #########################
+
+    struct Identity {
+        uint256 deposits;
+        uint256 debt;
+        uint256 tracker; // sum of changes of deposit * yeildPerToken
+    }
+
+    struct Context {
+        // Basis Points
+        uint16 maxLTV;
+        uint16 fee;
+    }
+
+    // #########################
+    // ##                     ##
     // ##       State         ##
     // ##                     ##
     // #########################
@@ -28,32 +46,23 @@ contract pVault {
     IERC20 internal collateral;
     IERC20 internal synthetic;
     yVault internal yearnVault;
-    address feeCollector;
+    address immutable feeCollector;
 
-    mapping (address => uint) public deposits;
-    mapping (address => uint) public debt;
+    mapping (address => Identity) identity;
 
     uint256 public totalDebt;
     uint256 public totalDeposits;
     uint256 public totalYearnDeposited;
     uint256 public feesAccumlated;
 
+    // 75% BP LTV :: 1.25% BP fee 
+    Context ctx = Context(7500, 125);
+
     // sum of all distribution events ( yeild / totalDeposits )
     // scaled 1e10.. As long as rewards accumlated between distributions
     // are greater than 1/1e10 totalDeposits , distribute() should return a nonzero value
     uint256 internal yeildPerDeposit;
     uint256 internal SCALAR;
-
-    // sum of changes of deposit * yeildPerToken
-    mapping (address => uint) internal depositTracker;
-
-    // Too bad using a uint16 in storage doesnt even save gas :(
-    // Say I wont pack it into a struct I dare you
-    // 75% BP
-    uint16 maxLTV = 7500;
-
-    // 1.25% BP ... Used to incentivize LPs
-    uint16 fee = 125;
 
     constructor(address _synthetic, address _yearnVault, address _collateral, address _feeCollector) {
     
@@ -71,12 +80,12 @@ contract pVault {
 
     function deposit(uint amount) external {
 
-        deposits[msg.sender] = deposits[msg.sender].add(amount);
+        identity[msg.sender].deposits = identity[msg.sender].deposits.add(amount);
         totalDeposits = totalDeposits.add(amount);
 
         // Im sorry this is ugly omg
-        depositTracker[msg.sender] = 
-            depositTracker[msg.sender]
+        identity[msg.sender].tracker = 
+            identity[msg.sender].tracker
                 .add(yeildPerDeposit.mul(amount).div(SCALAR));
         
         uint depositing = amount.mul(5000).div(10000);
@@ -92,11 +101,11 @@ contract pVault {
     function withdraw(uint amount) external {
 
         require( withdrawable(msg.sender) >= amount, "Amount too high");
-        deposits[msg.sender] = deposits[msg.sender].sub(amount);
+        identity[msg.sender].deposits = identity[msg.sender].deposits.sub(amount);
         totalDeposits = totalDeposits.sub(amount);
 
-        depositTracker[msg.sender] = 
-            depositTracker[msg.sender]
+        identity[msg.sender].tracker = 
+            identity[msg.sender].tracker
                 .sub(yeildPerDeposit.mul(amount).div(SCALAR));
         
         if ( amount > collateral.balanceOf(address(this)) ) {
@@ -111,12 +120,12 @@ contract pVault {
 
     function incurDebt(uint amount) external {
 
-        require( debt[msg.sender].add(amount) <= deposits[msg.sender].mul(maxLTV).div(10000) );
+        require( identity[msg.sender].debt.add(amount) <= identity[msg.sender].deposits.mul(ctx.maxLTV).div(10000) );
 
-        debt[msg.sender] = debt[msg.sender].add(amount);
+        identity[msg.sender].debt = identity[msg.sender].debt.add(amount);
         totalDebt = totalDebt.add(amount);
 
-        uint feeAdjust = amount.mul(fee).div(10000);
+        uint feeAdjust = amount.mul(ctx.fee).div(10000);
         feesAccumlated = feesAccumlated.add( amount.sub(feeAdjust) );
 
         synthetic.mint(msg.sender, feeAdjust);
@@ -125,8 +134,8 @@ contract pVault {
 
     function repayDebtSynth(uint amount) external {
 
-        require ( debt[msg.sender] >= amount );
-        debt[msg.sender] = debt[msg.sender].sub(amount);
+        require ( identity[msg.sender].debt >= amount );
+        identity[msg.sender].debt = identity[msg.sender].debt.sub(amount);
         totalDebt = totalDebt.sub(amount);
 
         synthetic.transferFrom(msg.sender, address(this), amount); //change to burn
@@ -135,8 +144,8 @@ contract pVault {
 
     function repayDebtAsset(uint amount) external {
 
-        require ( debt[msg.sender] >= amount );
-        debt[msg.sender] = debt[msg.sender].sub(amount);
+        require ( identity[msg.sender].debt >= amount );
+        identity[msg.sender].debt = identity[msg.sender].debt.sub(amount);
         totalDebt = totalDebt.sub(amount);
 
         collateral.transferFrom(msg.sender, address(this), amount);
@@ -198,11 +207,11 @@ contract pVault {
 
     function withdrawable(address who) internal view returns (uint) {
 
-        uint yeild = deposits[who]
+        uint yeild = identity[who].deposits
             .mul(yeildPerDeposit).div(SCALAR)
-                .sub(depositTracker[msg.sender]);
+                .sub(identity[msg.sender].tracker);
 
-        uint colSubDebt = deposits[who].sub(debt[who]);
+        uint colSubDebt = identity[who].deposits.sub(identity[who].debt);
 
         return colSubDebt.add(yeild);
 
