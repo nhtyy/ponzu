@@ -8,12 +8,9 @@ import "./libraries/yearnVault.sol";
 // Special thanks to twiiter@prism0x for this distribution algo
 // https://solmaz.io/2019/02/24/scalable-reward-changing/
 
+// minimial approch to self repaying loans, hardcodes 75% LTV or about 133% over collaterizaiton
+// eventually will make this adjustable
 
-/// @title PonzuVault :: Single asset token vault
-/// @author Nuhhtyy
-/// @notice Single asset vault, no liqudations synthetic self repaying over-collaterized loans
-///         All Yeild Generated from Yearn Vaults
-/// @dev 1% Fee taken via synth
 contract pVault {
 
     using SafeMath for uint;
@@ -50,12 +47,13 @@ contract pVault {
 
     mapping (address => Identity) identity;
 
-    uint256 public totalDebt;
+    //totalDebt = supply of synth
     uint256 public totalDeposits;
     uint256 public totalYearnDeposited;
     uint256 public feesAccumlated;
 
-    // 75% BP LTV :: 1.25% BP fee 
+    // 75% = ~133% LTV
+    // 75% BP LTV :: 1.25% BP fee
     Context ctx = Context(7500, 125);
 
     // sum of all distribution events ( yeild / totalDeposits )
@@ -64,12 +62,17 @@ contract pVault {
     uint256 internal yeildPerDeposit;
     uint256 internal SCALAR;
 
-    constructor(address _synthetic, address _yearnVault, address _collateral, address _feeCollector) {
+    constructor(
+        address _synthetic, 
+        address _yearnVault, 
+        address _collateral, 
+        address _feeCollector) {
     
         yearnVault = yVault(_yearnVault);
         collateral = IERC20(_collateral);
         synthetic = IERC20(_synthetic);
         feeCollector = _feeCollector;
+
     }
 
     // #########################
@@ -83,7 +86,6 @@ contract pVault {
         identity[msg.sender].deposits = identity[msg.sender].deposits.add(amount);
         totalDeposits = totalDeposits.add(amount);
 
-        // Im sorry this is ugly omg
         identity[msg.sender].tracker = 
             identity[msg.sender].tracker
                 .add(yeildPerDeposit.mul(amount).div(SCALAR));
@@ -123,7 +125,6 @@ contract pVault {
         require( identity[msg.sender].debt.add(amount) <= identity[msg.sender].deposits.mul(ctx.maxLTV).div(10000) );
 
         identity[msg.sender].debt = identity[msg.sender].debt.add(amount);
-        totalDebt = totalDebt.add(amount);
 
         uint feeAdjust = amount.mul(ctx.fee).div(10000);
         feesAccumlated = feesAccumlated.add( amount.sub(feeAdjust) );
@@ -136,7 +137,6 @@ contract pVault {
 
         require ( identity[msg.sender].debt >= amount );
         identity[msg.sender].debt = identity[msg.sender].debt.sub(amount);
-        totalDebt = totalDebt.sub(amount);
 
         synthetic.transferFrom(msg.sender, address(this), amount); //change to burn
 
@@ -146,7 +146,6 @@ contract pVault {
 
         require ( identity[msg.sender].debt >= amount );
         identity[msg.sender].debt = identity[msg.sender].debt.sub(amount);
-        totalDebt = totalDebt.sub(amount);
 
         collateral.transferFrom(msg.sender, address(this), amount);
 
@@ -179,13 +178,12 @@ contract pVault {
 
     }
 
-    //does not change user debt or overall debt
-    //Will likely change this somehow.. not sure yet
     function burnSynth(uint amount) public {
-        
-        totalDeposits = totalDeposits.sub(amount);
 
+        // reverts on fail
         synthetic.transferFrom(msg.sender, address(0), amount);
+
+        // system should always be overcollatirzed so this cant fail
         collateral.transfer(msg.sender, amount);
 
     }
@@ -207,13 +205,15 @@ contract pVault {
 
     function withdrawable(address who) internal view returns (uint) {
 
-        uint yeild = identity[who].deposits
+        uint deposits = identity[who].deposits;
+        uint yeild = deposits
             .mul(yeildPerDeposit).div(SCALAR)
                 .sub(identity[msg.sender].tracker);
 
-        uint colSubDebt = identity[who].deposits.sub(identity[who].debt);
+        // 75% of deposit = ~133% over-collateralized
+        uint overCollatDebt = identity[who].debt.mul(13300).div(10000);
 
-        return colSubDebt.add(yeild);
+        return deposits.sub(overCollatDebt).add(yeild);
 
     }
 
@@ -223,9 +223,9 @@ contract pVault {
         uint price = yearnVault.getPricePerFullShare();
 
         // tokenNeeded / sharePrice = sharesNeeded
-        uint adjusted = tokenNeeded.div(price);
-        totalYearnDeposited = totalYearnDeposited.sub(adjusted);
-        yearnVault.withdraw(adjusted);
+        uint sharesNeeded = tokenNeeded.div(price);
+        totalYearnDeposited = totalYearnDeposited.sub(sharesNeeded);
+        yearnVault.withdraw(sharesNeeded);
 
     }
 
