@@ -8,7 +8,7 @@ import "./libraries/yearnVault.sol";
 // Special thanks to twiiter@prism0x for this distribution algo
 // https://solmaz.io/2019/02/24/scalable-reward-changing/
 
-// minimial approch to self repaying loans, hardcodes 75% LTV or about 133% over collaterizaiton
+// minimial approch to self repaying loans, hardcodes 75% LTV or about 133% over-collaterizaiton
 // eventually will make this adjustable
 
 contract pVault {
@@ -52,7 +52,7 @@ contract pVault {
     uint256 public totalYearnDeposited;
     uint256 public feesAccumlated;
 
-    // 75% = ~133% LTV
+    // 75% = ~133% Over-collaterized
     // 75% BP LTV :: 1.25% BP fee
     Context ctx = Context(7500, 125);
 
@@ -66,7 +66,8 @@ contract pVault {
         address _synthetic, 
         address _yearnVault, 
         address _collateral, 
-        address _feeCollector) {
+        address _feeCollector
+    ) {
     
         yearnVault = yVault(_yearnVault);
         collateral = IERC20(_collateral);
@@ -103,6 +104,7 @@ contract pVault {
     function withdraw(uint amount) external {
 
         require( withdrawable(msg.sender) >= amount, "Amount too high");
+
         identity[msg.sender].deposits = identity[msg.sender].deposits.sub(amount);
         totalDeposits = totalDeposits.sub(amount);
 
@@ -122,7 +124,9 @@ contract pVault {
 
     function incurDebt(uint amount) external {
 
-        require( identity[msg.sender].debt.add(amount) <= identity[msg.sender].deposits.mul(ctx.maxLTV).div(10000) );
+        require( 
+            identity[msg.sender].debt.add(amount) <= identity[msg.sender].deposits.mul(ctx.maxLTV).div(10000) 
+        );
 
         identity[msg.sender].debt = identity[msg.sender].debt.add(amount);
 
